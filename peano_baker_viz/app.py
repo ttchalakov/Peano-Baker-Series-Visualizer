@@ -1,7 +1,7 @@
 import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
-from utils import parse_matrix_func, compute_peano_series, compute_true_solution
+from utils import parse_matrix_func, compute_peano_series, compute_true_solution, compute_error_bound, compute_peano_history
 
 # Polyfill for st.fragment (introduced in Streamlit 1.34)
 # Stlite might use an older version, so we define a no-op decorator if it's missing.
@@ -76,14 +76,26 @@ x0 = np.array([x1_0, x2_0])
 @st.cache_data
 def get_true_solution(matrix_str, T, x0):
     A_func = parse_matrix_func(matrix_str)
-    t_eval = np.linspace(0, T, 1000)
+    t_eval = np.linspace(0, T, 10000)
     return compute_true_solution(A_func, t_eval, x0), t_eval
 
 @st.cache_data
 def get_peano_series(matrix_str, T, n):
     A_func = parse_matrix_func(matrix_str)
-    t_eval = np.linspace(0, T, 1000)
+    t_eval = np.linspace(0, T, 10000)
     return compute_peano_series(A_func, t_eval, n)
+
+@st.cache_data
+def get_error_bound(matrix_str, T, n, x0_norm):
+    A_func = parse_matrix_func(matrix_str)
+    t_eval = np.linspace(0, T, 10000)
+    return compute_error_bound(A_func, t_eval, n, x0_norm)
+    
+@st.cache_data
+def get_peano_history(matrix_str, T, n):
+    A_func = parse_matrix_func(matrix_str)
+    t_eval = np.linspace(0, T, 10000)
+    return compute_peano_history(A_func, t_eval, n)
 
 # Computations
 try:
@@ -158,65 +170,94 @@ try:
         
     # Plot 3: Error Convergence
     st.subheader("Approximation Error over Time")
-    use_log_scale = st.checkbox("Log Scale", value=True)
+    
+    st.markdown("""
+    **Why use an Upper Bound?** 
+    In safety-critical applications, we often don't have the "true" solution to compare against. 
+    However, we can analytically derive a **theoretical upper bound** on the Peano-Baker series error. 
+    If this conservative bound stays within our safety tolerance, we can guarantee the approximation is safe to use 
+    up to a certain time horizon, providing a certification of accuracy without needing the exact solution.
+    """)
+
+    # Layout: Controls on Left, Plot on Right
+    col_err_controls, col_err_plot = st.columns([1, 3])
     
     # Error = ||x_true - x_approx||
     error = np.linalg.norm(x_true - x_approx, axis=1)
     
-    # Theoretical Bound
-    # We need compute_error_bound from utils
-    from utils import compute_error_bound
-    
-    @st.cache_data
-    def get_error_bound(matrix_str, T, n, x0_norm):
-        A_func = parse_matrix_func(matrix_str)
-        t_eval = np.linspace(0, T, 1000)
-        return compute_error_bound(A_func, t_eval, n, x0_norm)
+    # Theoretical Bound calculation (using cached function defined above)
         
     bound = get_error_bound(matrix_str, T_horizon, n_terms, np.linalg.norm(x0))
-    
-    # Calculate Validity Horizon (time until error bound > tolerance)
-    tolerance = 0.1 # 10% error relative to unit norm (arbitrary but useful)
-    # Find first index where bound > tolerance
-    valid_indices = np.where(bound > tolerance)[0]
-    if len(valid_indices) > 0:
-        valid_time = t_eval[valid_indices[0]]
-        valid_msg = f"{valid_time:.2f} s"
-    else:
-        valid_time = T_horizon
-        valid_msg = f"> {T_horizon:.2f} s"
 
-    col_metric1, col_metric2 = st.columns(2)
-    col_metric1.metric("Max Theoretical Error", f"{np.max(bound):.2e}")
-    col_metric2.metric("Validity Horizon (Bound < 0.1)", valid_msg)
-    
-    fig_error = go.Figure()
-    fig_error.add_trace(go.Scatter(x=t_eval, y=error, mode='lines', name='Actual Error', line=dict(color='orange')))
-    fig_error.add_trace(go.Scatter(x=t_eval, y=bound, mode='lines', name='Theoretical Bound', line=dict(color='gray', dash='dot')))
-    
-    yaxis_type = "log" if use_log_scale else "linear"
-    fig_error.update_layout(xaxis_title="Time (t)", yaxis_title="Error ||x_true - x_approx||", height=300, yaxis_type=yaxis_type)
-    st.plotly_chart(fig_error, width="stretch")
+    with col_err_controls:
+        use_log_scale = st.checkbox("Log Scale", value=True)
+        error_threshold = st.number_input("Error Threshold", value=0.01, min_value=1e-9, format="%.2e")
+        
+        # Calculate Validity Horizons
+        # 1. Theoretical Horizon
+        valid_indices_bound = np.where(bound > error_threshold)[0]
+        if len(valid_indices_bound) > 0:
+            valid_time_bound = t_eval[valid_indices_bound[0]]
+            valid_msg_bound = f"{valid_time_bound:.2f} s"
+        else:
+            valid_msg_bound = f"> {T_horizon:.2f} s"
+            
+        # 2. True Error Horizon
+        valid_indices_true = np.where(error > error_threshold)[0]
+        if len(valid_indices_true) > 0:
+            valid_time_true = t_eval[valid_indices_true[0]]
+            valid_msg_true = f"{valid_time_true:.2f} s"
+        else:
+            valid_msg_true = f"> {T_horizon:.2f} s"
+            
+        st.metric("Theoretical Validity Horizon", valid_msg_bound, help=f"Time until the theoretical bound exceeds {error_threshold}")
+        st.metric("True Validity Horizon", valid_msg_true, help=f"Time until the actual error exceeds {error_threshold}")
+
+    with col_err_plot:
+        fig_error = go.Figure()
+        fig_error.add_trace(go.Scatter(x=t_eval, y=error, mode='lines', name='Actual Error', line=dict(color='orange')))
+        fig_error.add_trace(go.Scatter(x=t_eval, y=bound, mode='lines', name='Theoretical Bound', line=dict(color='gray', dash='dot')))
+        
+        # Add threshold line
+        fig_error.add_hline(y=error_threshold, line_dash="dash", line_color="red", annotation_text="Threshold")
+        
+        yaxis_type = "log" if use_log_scale else "linear"
+        fig_error.update_layout(
+            xaxis_title="Time (t)", 
+            yaxis_title="Error ||x_true - x_approx||", 
+            height=300, 
+            yaxis_type=yaxis_type,
+            margin=dict(l=0, r=0, t=20, b=0)
+        )
+        st.plotly_chart(fig_error, width="stretch")
 
     with st.expander("ℹ️ How is the Upper Bound derived?"):
         st.markdown(r"""
-        The **Theoretical Bound** (dotted gray line) represents the worst-case error for a Peano-Baker series truncated after $N$ terms. It is derived by comparing the norm of the matrix series to the scalar exponential series.
+        ### Theoretical Foundation
+        This derivation is based on the work of **Baake & Schlägel**, *"The Peano–Baker series"* ([arXiv:1011.1775v3](https://arxiv.org/abs/1011.1775v3)).
 
-        **The Bound Formula:**
-        $$
-        ||\text{Error}(t)|| \le \left( e^{L(t)} - \sum_{k=0}^{N-1} \frac{L(t)^k}{k!} \right) ||x_0||
-        $$
+        **The Analytical Upper Bound**
+        Let $x(t)$ be the exact solution and $x_N(t)$ be the approximation using $N$ terms. The error is bounded by:
 
-        Where $L(t)$ is the cumulative integral of the system's "speed" (matrix norm):
         $$
-        L(t) = \int_{t_0}^t ||A(\sigma)|| d\sigma
+        \| x(t) - x_N(t) \| \le \underbrace{\left[ \exp\left( \int_{t_0}^t \|A(\tau)\| \, d\tau \right) - \sum_{k=0}^N \frac{1}{k!} \left( \int_{t_0}^t \|A(\tau)\| \, d\tau \right)^k \right]}_{\text{Scalar Series Tail}} \cdot \| x_0 \|
         $$
 
-        **Why does the error diverge?**
-        The Peano-Baker series behaves like a "matrix Taylor series". Just like the Taylor series for $e^x$ ($1 + x + x^2/2! + \dots$) converges for all $x$ but requires more terms as $x$ gets larger, the Peano-Baker series requires more terms as the "cumulative magnitude" $L(t)$ grows.
-        
-        *   **Small $L(t)$** (short time or slow dynamics): The first few terms capture almost all the behavior.
-        *   **Large $L(t)$** (long time or fast dynamics): The truncated series fails to keep up with the true exponential growth, causing the error to explode (often exponentially) once $L(t)$ exceeds the "capacity" of the $N$ terms you selected.
+        ### Derivation Key Points
+        1.  **Error Vector**: The error in the solution is $e(t) = (\Phi(t, t_0) - \Phi_N(t, t_0)) x_0$.
+        2.  **Norm Property**: Using the sub-multiplicative property $\|M v\| \le \|M\| \|v\|$, we separate the initial condition:
+            $$ \| x(t) - x_N(t) \| \le \| \Phi(t, t_0) - \Phi_N(t, t_0) \| \cdot \| x_0 \| $$
+        3.  **Scalar Dominant**: The matrix error norm $\| \Phi - \Phi_N \|$ is bounded by the tail of the scalar exponential series of the cumulative norm (or "gain") $L(t) = \int_{t_0}^t \|A(\tau)\| d\tau$.
+
+        ### Interpretation
+        *   **Worst-Case Scenario**: This bound assumes the initial state $x_0$ aligns perfectly with the direction of maximum error growth.
+        *   **Influence of Dynamics**: If $\|A(t)\|$ is large (high gain/fast dynamics), $L(t)$ grows quickly, requiring a larger $N$ to suppress the scalar tail.
+
+        **Note on Numerical vs. Theoretical Error**:
+        You may observe that the **Actual Error** is slightly higher than the **Theoretical Bound** at very small magnitudes (e.g., $10^{-10}$). This is due to **discretization error** in the numerical integration. The Theoretical Bound only accounts for the *truncation* of the series.
+
+        **Why is the Bound so loose for Stable Systems?**
+        You might notice the bound exploding while the actual error stays small. This is because **the bound is conservative**: it depends on $ \exp(\int \|A\|) $, which treats every matrix contribution as "growth" (ignoring signs and directions). accurate cancellation or stability (like in a damped oscillator) is ignored by the norm. Thus, for stable systems with large $\|A\|$, the bound assumes a worst-case explosion that doesn't actually happen.
         """)
 
     # --- Sensitivity Analysis Section ---
@@ -308,14 +349,7 @@ try:
     st.markdown("---")
     st.header("Advanced Visualizations")
     
-    # We need compute_peano_history
-    from utils import compute_peano_history
-    
-    @st.cache_data
-    def get_peano_history(matrix_str, T, n):
-        A_func = parse_matrix_func(matrix_str)
-        t_eval = np.linspace(0, T, 1000)
-        return compute_peano_history(A_func, t_eval, n)
+    # We use the cached `get_peano_history` defined at the top of the file
 
     tab1, tab2, tab3, tab4 = st.tabs(["Convergence Heatmap", "Trajectory Animation", "Computational Complexity", "Term Contribution Analysis"])
     
@@ -520,7 +554,7 @@ try:
                     
                     # Get terms
                     A_func_analysis = parse_matrix_func(matrix_str)
-                    t_eval_analysis = np.linspace(0, T_horizon, 1000)
+                    t_eval_analysis = np.linspace(0, T_horizon, 10000)
                     terms = compute_peano_terms(A_func_analysis, t_eval_analysis, analysis_n)
                     # terms shape: (n_terms, n_points, n, n)
                     
