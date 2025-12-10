@@ -86,3 +86,5 @@ GitHub Pages is configured to serve the `/docs` folder from the main branch.
 *   `docs/`: Static site assets for GitHub Pages deployment (contains `index.html` and mirrors the python files).
 
 The pages webiste hosts a preview of the streamlit app. It is not exactly the same as what is seen if running the streamlit app itself.
+
+You can see the app in action at [Peano-Baker-Series-Visualizer](https://ttchalakov.github.io/Peano-Baker-Series-Visualizer/).
