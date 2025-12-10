@@ -3,6 +3,13 @@ import numpy as np
 import plotly.graph_objects as go
 from utils import parse_matrix_func, compute_peano_series, compute_true_solution
 
+# Polyfill for st.fragment (introduced in Streamlit 1.34)
+# Stlite might use an older version, so we define a no-op decorator if it's missing.
+if not hasattr(st, "fragment"):
+    def fragment(func):
+        return func
+    st.fragment = fragment
+
 st.set_page_config(page_title="Peano-Baker Series Visualizer", layout="wide")
 
 st.title("Peano-Baker Series Visualizer")
