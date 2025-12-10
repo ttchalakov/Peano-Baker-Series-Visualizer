@@ -280,3 +280,38 @@ def compute_error_bound(A_func, t_eval, n_terms, x0_norm):
         
     bound = bound * x0_norm
     return bound
+
+def compute_incremental_peano_terms(A_func, t_eval, start_n, n_new_terms, prev_term):
+    """
+    Computes additional terms for the Peano-Baker series starting from a previous term.
+    
+    Args:
+        A_func (function): Function A(t).
+        t_eval (array): Time points (must match the one used for prev_term).
+        start_n (int): The index of the first new term to compute (e.g. if we have 0..9, start_n=10).
+        n_new_terms (int): How many new terms to compute.
+        prev_term (ndarray): The (start_n - 1)-th term of the series. Shape (n_points, n, n).
+        
+    Returns:
+        list of ndarray: List containing [term_start_n, term_start_n+1, ...]
+    """
+    new_terms = []
+    
+    # Pre-compute A(t)
+    A_stack = np.array([A_func(t) for t in t_eval])
+    
+    Phi_term_prev = prev_term.copy()
+    
+    for k in range(n_new_terms):
+        # M(tau) = A(tau) * Phi_term_prev(tau)
+        M_stack = np.einsum('ijk,ikl->ijl', A_stack, Phi_term_prev)
+        
+        # Integrate to get next term
+        Phi_term_new = cumulative_trapezoid(M_stack, t_eval, axis=0, initial=0)
+        
+        new_terms.append(Phi_term_new)
+        
+        # Update for next iteration
+        Phi_term_prev = Phi_term_new
+        
+    return new_terms
