@@ -60,7 +60,11 @@ with col_max:
 with col_slider:
     n_terms = st.slider("Number of Terms (N)", min_value=1, max_value=max_terms, value=5)
 
-T_horizon = st.sidebar.slider("Time Horizon (T)", min_value=1.0, max_value=20.0, value=10.0)
+col_T_slider, col_T_max = st.sidebar.columns([3, 1])
+with col_T_max:
+    max_T = st.number_input("Max T", min_value=1.0, max_value=60.0, value=20.0, step=1.0, label_visibility="collapsed")
+with col_T_slider:
+    T_horizon = st.slider("Time Horizon (T)", min_value=0.5, max_value=max_T, value=min(10.0, max_T), step=0.1)
 
 # Initial Conditions
 st.sidebar.subheader("Initial Conditions x(0)")
