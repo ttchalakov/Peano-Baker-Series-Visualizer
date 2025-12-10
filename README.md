@@ -84,3 +84,5 @@ GitHub Pages is configured to serve the `/docs` folder from the main branch.
     *   `utils.py`: Core mathematical engine.
     *   `case_studies.py`: Robot simulation logic.
 *   `docs/`: Static site assets for GitHub Pages deployment (contains `index.html` and mirrors the python files).
+
+The pages webiste hosts a preview of the streamlit app. It is not exactly the same as what is seen if running the streamlit app itself.
