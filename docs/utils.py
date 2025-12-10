@@ -215,7 +215,7 @@ def compute_true_solution(A_func, t_eval, x0):
     def odes(t, x):
         return A_func(t) @ x
         
-    sol = solve_ivp(odes, t_span, x0, t_eval=t_eval, rtol=1e-9, atol=1e-9)
+    sol = solve_ivp(odes, t_span, x0, t_eval=t_eval, rtol=1e-13, atol=1e-13)
     
     # sol.y is (n, n_points), we want (n_points, n)
     return sol.y.T
@@ -224,8 +224,7 @@ def compute_error_bound(A_func, t_eval, n_terms, x0_norm):
     """
     Computes the theoretical upper bound on the error of the Peano-Baker series approximation.
     
-    Bound = (exp(L(t)) - sum_{k=0}^{N-1} L(t)^k / k!) * ||x0||
-    where L(t) = int_{t0}^t ||A(tau)|| dtau
+    Bound = (sum_{k=N}^{infinity} L(t)^k / k!) * ||x0||
     
     Args:
         A_func (function): Function A(t).
@@ -236,29 +235,83 @@ def compute_error_bound(A_func, t_eval, n_terms, x0_norm):
     Returns:
         np.ndarray: Error bound values for each time point in t_eval.
     """
+    import math
+    
     # 1. Compute norm of A(t) at each time point
-    # We use Frobenius norm or 2-norm. Frobenius is easier/faster and is a valid consistent norm.
     A_norms = np.array([np.linalg.norm(A_func(t), ord='fro') for t in t_eval])
     
     # 2. Compute L(t) = cumulative integral of ||A(tau)||
     L_t = cumulative_trapezoid(A_norms, t_eval, initial=0)
     
-    # 3. Compute the tail of the exponential series
-    # Error <= (e^L - sum_{k=0}^{N-1} L^k/k!) * ||x0||
-    # Note: n_terms includes Identity (k=0). So if n_terms=5, we have terms 0, 1, 2, 3, 4.
-    # The approximation uses terms up to n_terms-1.
+    # 3. Compute the tail of the exponential series directly
+    # Bound = sum_{k=N}^{\infty} L^k/k! * ||x0||
+    # This avoids catastrophic cancellation from (exp(L) - sum) when error is small.
     
-    exp_L = np.exp(L_t)
+    bound = np.zeros_like(L_t)
     
-    sum_terms = np.zeros_like(L_t)
-    for k in range(n_terms):
+    # We sum enough terms for the tail to converge to machine precision
+    # Usually 20-30 extra terms is plenty
+    tail_terms = 50 
+    
+    for k in range(n_terms, n_terms + tail_terms):
         # Add term L^k / k!
-        # Use simple power and factorial for small k
-        # For larger k, this might overflow, but n_terms is usually small (<100)
-        # For safety with 1000 terms, we should be careful, but for visualization N is usually < 50.
-        # Let's assume standard float64 precision is enough for typical usage.
-        term = (L_t**k) / math.factorial(k)
-        sum_terms += term
+        # Use simple power and factorial
+        # For very large N, we should be careful with factorial overflow, 
+        # but for visualization (N < 100), float64 is usually okay.
+        # Ideally we would use logs, but let's stick to direct calc for speed/simplicity first.
         
-    bound = (exp_L - sum_terms) * x0_norm
+        # log_term = k * np.log(L_t + 1e-20) - math.lgamma(k + 1)
+        # term = np.exp(log_term)
+        
+        # Direct calculation is riskier for N > 170 due to factorial.
+        # Let's implement a safer recursive update for the terms.
+        # term_k = term_{k-1} * L / k
+        
+        if k == n_terms:
+            # Compute first term of tail: L^N / N!
+            # Use log-exp to avoid intermediate overflow
+            log_vals = n_terms * np.log(L_t + 1e-300) - math.lgamma(n_terms + 1)
+            term = np.exp(log_vals)
+        else:
+            # Recursive update: term_new = term_old * L / k
+            term = term * L_t / k
+            
+        bound += term
+        
+    bound = bound * x0_norm
     return bound
+
+def compute_incremental_peano_terms(A_func, t_eval, start_n, n_new_terms, prev_term):
+    """
+    Computes additional terms for the Peano-Baker series starting from a previous term.
+    
+    Args:
+        A_func (function): Function A(t).
+        t_eval (array): Time points (must match the one used for prev_term).
+        start_n (int): The index of the first new term to compute (e.g. if we have 0..9, start_n=10).
+        n_new_terms (int): How many new terms to compute.
+        prev_term (ndarray): The (start_n - 1)-th term of the series. Shape (n_points, n, n).
+        
+    Returns:
+        list of ndarray: List containing [term_start_n, term_start_n+1, ...]
+    """
+    new_terms = []
+    
+    # Pre-compute A(t)
+    A_stack = np.array([A_func(t) for t in t_eval])
+    
+    Phi_term_prev = prev_term.copy()
+    
+    for k in range(n_new_terms):
+        # M(tau) = A(tau) * Phi_term_prev(tau)
+        M_stack = np.einsum('ijk,ikl->ijl', A_stack, Phi_term_prev)
+        
+        # Integrate to get next term
+        Phi_term_new = cumulative_trapezoid(M_stack, t_eval, axis=0, initial=0)
+        
+        new_terms.append(Phi_term_new)
+        
+        # Update for next iteration
+        Phi_term_prev = Phi_term_new
+        
+    return new_terms

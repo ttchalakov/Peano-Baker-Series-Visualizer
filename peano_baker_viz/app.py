@@ -625,15 +625,32 @@ try:
                     # Compute norm of each term at final time T
                     # We take the last point: terms[:, -1, :, :]
                     final_terms = terms[:, -1, :, :]
+                    magnitudes = [np.linalg.norm(term, ord='fro') for term in final_terms]
                     
                     if magnitudes[-1] < 1e-15:
                         st.success("✅ The series has converged to machine precision.")
-                    elif magnitudes[-1] < 1e-6:
-                        st.success("✅ The series is converging well.")
-                    elif magnitudes[-1] > magnitudes[0]:
-                        st.error("⚠️ The series is diverging! The terms are getting larger.")
-                    else:
-                        st.warning("⚠️ The series has not fully converged yet.")
+                    
+                    # Plotting
+                    # Truncate for visualization (don't show 100 zeros if it converged at term 10)
+                    display_mags = []
+                    for m in magnitudes:
+                        display_mags.append(m)
+                        if m < 1e-16:
+                             break
+                    
+                    fig = go.Figure(data=[
+                        go.Bar(x=list(range(1, len(display_mags)+1)), y=display_mags)
+                    ])
+                    
+                    fig.update_layout(
+                        title="Decay of Term Magnitudes",
+                        xaxis_title="k-th Term",
+                        yaxis_title="Frobenius Norm ||Phi_k(T)||",
+                        yaxis_type="log",
+                        height=400
+                    )
+                    
+                    st.plotly_chart(fig, width="stretch")
         
         term_analysis_fragment()
 
@@ -801,6 +818,310 @@ try:
             st.success("✅ Surfaces Computed. Compare how sensitivity to 'stiffness' differs from sensitivity to 'perturbation noise'.")
             
     parameter_sensitivity_fragment()
+
+    # --- Case Study Section ---
+    st.markdown("---")
+    st.header("🤖 Case Study: Variable-Height Humanoid Balance")
+    
+    st.markdown(r"""
+    **The "Capture Point" Problem**:
+    A walking robot needs to place its foot ($u$) at a specific spot to come to a complete stop *or* maintain a walking gait.
+    
+    *   **Standard Theory (LIPM)**: Assumes the robot's center of mass height $z_c$ is **constant**. This gives a simple Linear Time-Invariant (LTI) system.
+    *   **Real World (Squatting/Walking)**: If the robot changes height (e.g., crouching), the system becomes **Linear Time-Varying (LTV)**:
+        $$ \ddot{x} = \frac{g}{z(t)} (x - u) $$
+        
+    **Simulation Logic**:
+    *   **Walking (Steps 1-4)**: The controller targets a **symmetric gait**, swinging the body from $-x$ to $+x$ relative to the foot.
+    *   **Stopping (Step 6)**: The controller targets **zero velocity**, effectively finding the "Capture Point" that arrests motion.
+    
+    > **Disclaimer**: This demo skips rigorous derivation details (e.g., ZMP constraints, N-step MPC) to focus purely on the mathematical utility of the **Peano-Baker Series**: it allows us to invert the dynamics of an arbitrary LTV system to find the exact control input $u$ needed to reach a target state.
+    """)
+    
+    @st.fragment
+    def case_study_lipm_fragment():
+        col_case_1, col_case_2 = st.columns(2)
+        
+        with col_case_1:
+            st.subheader("Robot Parameters")
+            h0 = st.slider("Average Height (m)", 0.5, 1.5, 0.5)
+            T_step = st.slider("Step Duration (s)", 0.3, 1.0, 0.8)
+            
+        with col_case_2:
+            st.subheader("Simulation Controls")
+            lipm_N = st.number_input("Peano Terms (N)", value=20, min_value=1, max_value=50)
+            target_v = st.slider("Target Walking Speed (m/s)", 0.1, 1.0, 0.5)
+            
+        if st.button("Run walking Simulation (6 Steps)", type="primary"):
+            
+            # 1. Physics Definition
+            g = 9.81
+            amp_z = 0.2 # Fixed squat amplitude for simplicity in demo
+            
+            # Height Profile: z(t) - Periodic per step
+            def z_profile(t):
+                # Cosine profile: starts at h0+amp, dips to h0-amp
+                # t is local time in step [0, T_step]
+                return h0 + amp_z * np.cos(2 * np.pi * t / T_step)
+            
+            # System Matrices for LTV: x_dot = A(t)x + B(t)u
+            def get_A_lipm(t):
+                zt = z_profile(t)
+                return np.array([[0.0, 1.0], [g/zt, 0.0]])
+                
+            def get_B_lipm(t):
+                zt = z_profile(t)
+                return np.array([0.0, -g/zt])
+            
+            # Time grid for one step
+            n_step_pts = 50
+            t_one_step = np.linspace(0, T_step, n_step_pts)
+            
+            # --- Pre-compute Peano Matrices (Same for every step due to periodicity) ---
+            with st.spinner("Computing Controller..."):
+                # Peano (LTV)
+                Phi_series = compute_peano_series(get_A_lipm, t_one_step, lipm_N)
+                Phi_T = Phi_series[-1]
+                
+                integrand_B = np.zeros((len(t_one_step), 2))
+                for i, t_val in enumerate(t_one_step):
+                    Phi_inv = np.linalg.inv(Phi_series[i])
+                    B_val = get_B_lipm(t_val)
+                    integrand_B[i] = Phi_inv @ B_val
+                integral_B_term = cumulative_trapezoid(integrand_B, t_one_step, axis=0, initial=0)
+                Gamma_T = Phi_T @ integral_B_term[-1]
+                
+                # Naive (LTI) - Constant A
+                A_lti_func = lambda t: np.array([[0.0, 1.0], [g/h0, 0.0]])
+                Phi_lti_series = compute_peano_series(A_lti_func, t_one_step, lipm_N)
+                Phi_T_lti = Phi_lti_series[-1]
+                
+                integrand_B_lti = np.zeros((len(t_one_step), 2))
+                B_const = np.array([0.0, -g/h0])
+                for i in range(len(t_one_step)):
+                    integrand_B_lti[i] = np.linalg.inv(Phi_lti_series[i]) @ B_const
+                Gamma_T_lti = Phi_T_lti @ cumulative_trapezoid(integrand_B_lti, t_one_step, axis=0, initial=0)[-1]
+                
+            # --- Simulation Loop (6 Steps) ---
+            
+            # State: [x_rel, v] (x relative to current stance foot)
+            # We also track [x_abs] for plotting
+            
+            # Initial absolute state
+            x_abs_peano = 0.0
+            x_abs_naive = 0.0
+            v_peano = 0.0 # Start from rest
+            v_naive = 0.0
+            
+            # Data containers for plotting
+            history_peano_x = []
+            history_peano_z = []
+            history_naive_x = []
+            history_naive_z = []
+            footsteps_peano = []
+            footsteps_naive = []
+            
+            # We assume starting stance foot is at 0
+            foot_peano = 0.0
+            foot_naive = 0.0
+            
+            footsteps_peano.append(foot_peano)
+            footsteps_naive.append(foot_naive)
+            
+            # Simulation
+            n_steps = 6
+            
+            for step_idx in range(n_steps):
+                # Controller Strategy Selection
+                # Step 0: Accelerate (Velocity Control)
+                # Steps 1-(N-2): Maintain Gait (Symmetry Control)
+                # Step (N-1): Decelerate/Stop (Velocity Control)
+                
+                strategy = "symmetry"
+                if step_idx == 0:
+                    strategy = "velocity"
+                    v_tgt = target_v
+                elif step_idx == n_steps - 1:
+                    strategy = "velocity"
+                    v_tgt = 0.0
+                else: 
+                     strategy = "symmetry" # Maintain natural swing
+                
+                
+                # Current Absolute State
+                x0_vec_p = np.array([x_abs_peano, v_peano])
+                x0_vec_n = np.array([x_abs_naive, v_naive])
+                
+                # Calculate Control u based on strategy
+                
+                # --- PEANO CONTROL ---
+                if strategy == "velocity":
+                    # Velocity Control: v(T) = Phi_21 x + Phi_22 v + Gamma_2 u = v_tgt
+                    numerator_p = v_tgt - np.dot(Phi_T[1, :], x0_vec_p)
+                    u_p = numerator_p / Gamma_T[1]
+                else:
+                    # Symmetry Control: x_rel(T) = -x_rel(0)
+                    # Implies u is exactly in the midpoint of x(0) and x(T)
+                    # u = (x0*(1+Phi_11) + v0*Phi_12) / (2 - Gamma_1)
+                    num = x0_vec_p[0] * (1 + Phi_T[0,0]) + x0_vec_p[1] * Phi_T[0,1]
+                    den = 2.0 - Gamma_T[0]
+                    u_p = num / den
+
+                # --- NAIVE CONTROL ---
+                if strategy == "velocity":
+                    numerator_n = v_tgt - np.dot(Phi_T_lti[1, :], x0_vec_n)
+                    u_n = numerator_n / Gamma_T_lti[1]
+                else:
+                    # Symmetry
+                    num_n = x0_vec_n[0] * (1 + Phi_T_lti[0,0]) + x0_vec_n[1] * Phi_T_lti[0,1]
+                    den_n = 2.0 - Gamma_T_lti[0]
+                    u_n = num_n / den_n
+                
+                # Store Footsteps
+                footsteps_peano.append(u_p)
+                footsteps_naive.append(u_n)
+                
+                # 3. Simulate this step dynamics
+                # Trajectory for this step
+                
+                # Peano (True System)
+                for k in range(len(t_one_step)):
+                    # Gamma(t)
+                    Gamma_t_p = Phi_series[k] @ integral_B_term[k]
+                    # State(t)
+                    state_p = Phi_series[k] @ x0_vec_p + Gamma_t_p * u_p
+                    
+                    history_peano_x.append(state_p[0])
+                    history_peano_z.append(z_profile(t_one_step[k]))
+                    
+                # Naive (True System driven by naive u)
+                for k in range(len(t_one_step)):
+                    Gamma_t_n = Phi_series[k] @ integral_B_term[k] # Driven by TRUE LTV physics
+                    state_n = Phi_series[k] @ x0_vec_n + Gamma_t_n * u_n
+                    
+                    history_naive_x.append(state_n[0])
+                    history_naive_z.append(z_profile(t_one_step[k]))
+                    
+                # Update State for next step
+                x_abs_peano = history_peano_x[-1]
+                v_peano =     state_p[1] # Velocity is continuous
+                
+                x_abs_naive = history_naive_x[-1]
+                v_naive =     state_n[1]
+                
+            # --- Animation ---
+            
+            # Combine history arrays
+            traj_p_x = np.array(history_peano_x)
+            traj_p_z = np.array(history_peano_z)
+            traj_n_x = np.array(history_naive_x)
+            
+            total_frames = len(traj_p_x)
+            
+            # Sub-sample frames for smooth animation relative to browser performance through frame.duration
+            # We want Real-Time. 
+            # Total Simulation Time = n_steps * T_step
+            # Total Points = n_steps * n_step_pts
+            # dt per point = T_step / n_step_pts
+            
+            step_stride = 1 # Plot every point for smoothness if performance allows? 
+            # If we have 300 points for 3 seconds, that's 100fps. Too fast or browser lag?
+            # Let's aim for 30-60fps.
+            # If T_step=0.5, n_pts=50. Total 6 steps = 3.0s. 300 points.
+            # 300 frames in 3s = 100fps. A bit high. Let's stride by 2.
+            
+            step_stride = 1
+            if (n_steps * n_step_pts) / (n_steps * T_step) > 60:
+                 step_stride = 2
+            
+            # Calculate Frame Duration in ms
+            # Calculate Frame Duration in ms
+            # dt is variable from earlier scope which isn't available here, so we re-derive it
+            dt_local = T_step / n_step_pts
+            frame_dur_ms = dt_local * step_stride * 1000 
+            
+            frames = []
+            for k in range(0, total_frames, step_stride): 
+                step_num = k // n_step_pts
+                
+                # Identify Foot Position
+                # footsteps array: [init_0, u_0 (step 0), u_1 (step 1), ...]
+                # step_num starts at 0.
+                # Dynamics for step_num=0 used footsteps[1] (u_0).
+                # So we must draw leg from footsteps[step_num + 1].
+                
+                idx_foot = step_num + 1
+                if idx_foot < len(footsteps_peano):
+                    ft_p = footsteps_peano[idx_foot]
+                    ft_n = footsteps_naive[idx_foot]
+                else: 
+                    # Should not happen if frames align with steps, but safety fallback
+                    ft_p = footsteps_peano[-1]
+                    ft_n = footsteps_naive[-1]
+                
+                # Check for "Crash" - if Naive diverges too much, stop drawing it or cap it?
+                # Visuals handle it naturally (it flies off chart).
+                
+                frames.append(go.Frame(data=[
+                    # Peano Robot (Leg + Body)
+                    go.Scatter(x=[ft_p, traj_p_x[k]], y=[0, traj_p_z[k]], mode='lines+markers', 
+                               marker=dict(size=[10, 20], color='green'), 
+                               line=dict(color='green', width=6)),
+                    # Naive Robot
+                    go.Scatter(x=[ft_n, traj_n_x[k]], y=[0, traj_p_z[k]], mode='lines+markers', 
+                               marker=dict(size=[8, 15], color='red'), 
+                               line=dict(color='red', dash='dot', width=3)),
+                    # Trails
+                    go.Scatter(x=traj_p_x[:k+1], y=traj_p_z[:k+1]),
+                    go.Scatter(x=traj_n_x[:k+1], y=traj_p_z[:k+1]),
+                ]))
+                
+            fig_anim = go.Figure(
+                data=[
+                    # Initial state (dummy for legend)
+                    go.Scatter(x=[0,0], y=[0, h0], name='Peano (LTV)', mode='lines+markers', marker=dict(size=15), line=dict(color='green', width=6)),
+                    go.Scatter(x=[0,0], y=[0, h0], name='Naive (LTI)', mode='lines+markers', marker=dict(size=12), line=dict(color='red', dash='dot', width=3)),
+                    go.Scatter(x=[], y=[], name='P Trace', mode='lines', line=dict(color='green', width=1)),
+                    go.Scatter(x=[], y=[], name='N Trace', mode='lines', line=dict(color='red', width=1))
+                ],
+                layout=go.Layout(
+                    title="Real-Time Walking Simulation",
+                    xaxis=dict(title="Position (m)", range=[-0.5, target_v * n_steps * T_step * 1.5]), 
+                    yaxis=dict(title="Height (m)", range=[-0.1, 1.5], scaleanchor="x", scaleratio=1), # 1:1 Aspect Ratio
+                    
+                    # Ground Line
+                    shapes=[dict(type="line", x0=-10, y0=0, x1=20, y1=0, line=dict(color="black", width=2))],
+                    
+                    updatemenus=[dict(
+                        type="buttons", 
+                        buttons=[dict(label="▶️ Play Real-Time", 
+                                      method="animate", 
+                                      args=[None, dict(frame=dict(duration=frame_dur_ms, redraw=False), 
+                                                       fromcurrent=True, 
+                                                       transition=dict(duration=0))])]
+                    )],
+                    height=500,
+                    margin=dict(t=40, b=0)
+                ),
+                frames=frames
+            )
+            
+            st.plotly_chart(fig_anim, width="stretch")
+            
+            # Final Report
+            st.write(f"**Final Velocity (Peano)**: {v_peano:.3f} m/s (Target: 0.0)")
+            st.write(f"**Final Velocity (Naive)**: {v_naive:.3f} m/s")
+            
+            if abs(v_peano) < 0.1:
+                st.success(f"✅ Peano Controller successfully walked and stopped! (Distance covered: {x_abs_peano:.2f} m)")
+            else:
+                st.warning("⚠️ Peano Controller drifting.")
+                
+            if abs(v_naive) > 0.5:
+                # If naive crashed, message
+                st.error("❌ Naive Controller (Red) crashed. The LTI assumption caused it to place feet incorrectly for the variable height.")
+
+    case_study_lipm_fragment()
 
 
 
